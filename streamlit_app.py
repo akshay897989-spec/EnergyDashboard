@@ -1,29 +1,10 @@
 import streamlit as st
-import feedparser
-import json
+import feedparser, json, re
 from groq import Groq
-import re
-
-def extract_json(text):
-    """
-    Safely extract first JSON object from model output.
-    """
-    try:
-        return json.loads(text)
-    except:
-        pass
-
-    match = re.search(r"\{.*\}", text, re.DOTALL)
-    if match:
-        try:
-            return json.loads(match.group())
-        except:
-            return None
-    return None
 from datetime import datetime
 
 # ---------------- CONFIG ----------------
-st.set_page_config(page_title="STRAT-INT TERMINAL", layout="wide")
+st.set_page_config(page_title="Renewable Investor — Strategic Outlook", layout="wide")
 
 SUBJECTS = [
     "Grid & Macro",
@@ -36,20 +17,47 @@ SUBJECTS = [
 
 COUNTRIES = ["Australia", "New Zealand", "India", "South Korea", "Japan"]
 
-FEEDS = [
-    "https://reneweconomy.com.au/feed/",
-    "https://www.utilitydive.com/feeds/news/",
-    "https://www.energy-storage.news/feed/",
-    "https://www.hydrogeninsight.com/?service=rss",
-    "https://www.reuters.com/business/energy/feed/"
-]
+# --------- MODULE-SPECIFIC FEEDS ----------
+FEEDS = {
+    "Grid & Macro": [
+        "https://www.utilitydive.com/feeds/news/",
+        "https://www.reuters.com/business/energy/feed/"
+    ],
+    "Renewables": [
+        "https://reneweconomy.com.au/feed/",
+        "https://www.pv-tech.org/feed/"
+    ],
+    "Battery Storage": [
+        "https://www.energy-storage.news/feed/"
+    ],
+    "Hydrogen & PTX": [
+        "https://www.hydrogeninsight.com/?service=rss"
+    ],
+    "Nuclear and SMR": [
+        "https://www.world-nuclear-news.org/feeds/rss.xml"
+    ],
+    "Demand": [
+        "https://www.iea.org/rss/news",
+        "https://www.datacenterdynamics.com/en/rss/"
+    ]
+}
+
+# ---------- KEYWORD FILTER PER MODULE ----------
+KEYWORDS = {
+    "Grid & Macro": ["grid", "transmission", "interconnection", "tariff", "utility", "congestion"],
+    "Renewables": ["solar", "wind", "renewable", "ppa", "module", "turbine"],
+    "Battery Storage": ["battery", "storage", "bess", "lithium"],
+    "Hydrogen & PTX": ["hydrogen", "electrolyser", "ammonia", "ptx"],
+    "Nuclear and SMR": ["nuclear", "smr", "reactor"],
+    "Demand": ["data center", "electricity demand", "load growth", "ai power"]
+}
 
 # ---------------- STYLE ----------------
 st.markdown("""
 <style>
 body {background:#050a14;color:#e5e7eb;}
 .card {background:#0b1220;border:1px solid #1f2937;padding:18px;border-radius:8px;margin-bottom:18px;}
-.hdr {color:#22d3ee;font-weight:700;text-transform:uppercase;}
+.hdr {color:#22d3ee;font-weight:700;}
 .good {color:#22c55e;}
 .bad {color:#ef4444;}
 </style>
@@ -64,105 +72,80 @@ with st.sidebar:
 st.title("Renewable Investor — Strategic Outlook")
 st.caption(f"{country} | {datetime.now().strftime('%d %b %Y')}")
 
-# ---------------- LLM PROMPT ----------------
+# ---------------- PROMPT ----------------
 SYSTEM_PROMPT = """
-You are Head of Research at a global renewable energy investment firm.
-Write as if briefing the CEO.
+You are Head of Research at a renewable infrastructure investment firm.
+Write like an executive briefing the CIO.
 
 Return ONLY valid JSON:
 
 {
- "core_thesis":"3-4 sentence executive summary",
+ "core_thesis":"2–3 sentence investment stance",
  "drivers":[{"sign":"positive|negative","text":"driver"}],
  "bull_case":["..."],
  "bear_case":["..."],
- "verdict":"Bullish/Bearish/Neutral and why in one sentence",
- "technology_context":["global tech truths"],
+ "verdict":"one sentence",
  "news":[{"headline":"...","link":"..."}]
 }
 
 Rules:
-- Think first principles.
-- Judge economics, not sentiment.
-- Commissioning capacity is POSITIVE unless it destroys pricing.
-- Use ONLY country-relevant news.
+- Drivers must be structural, not descriptive.
+- Commissioning capacity is POSITIVE unless it collapses pricing.
+- Use only supplied news.
+- Output must start with { and end with }.
 """
 
-def fetch_country_news(country):
-    results=[]
-    for url in FEEDS:
-        feed=feedparser.parse(url)
-        for e in feed.entries[:30]:
-            text=(e.title + e.get("summary","")).lower()
-            if country.lower() in text:
-                results.append({"headline":e.title,"link":e.link})
-    return results[:10]
+# ---------------- HELPERS ----------------
+def extract_json(text):
+    try:
+        return json.loads(text)
+    except:
+        match=re.search(r"\{.*\}",text,re.DOTALL)
+        if match:
+            try: return json.loads(match.group())
+            except: return None
+    return None
 
-def analyze_block(block, country, news):
+def fetch_news(block, country):
+    results=[]
+    for url in FEEDS[block]:
+        feed=feedparser.parse(url)
+        for e in feed.entries[:40]:
+            text=(e.title + e.get("summary","")).lower()
+            if country.lower() in text and any(k in text for k in KEYWORDS[block]):
+                results.append({"headline":e.title,"link":e.link})
+    return results[:8]
+
+def analyze(block, news):
     if not st.session_state.key:
         return None
-
-    client = Groq(api_key=st.session_state.key)
-    context = "\n".join([n["headline"] for n in news])
-
-    msg = f"""
-Block: {block}
-Country: {country}
-
-News:
-{context}
-
-Return strictly valid JSON only.
-"""
-
-    try:
-        res = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": msg}
-            ],
-            temperature=0.2
-        )
-
-        raw = res.choices[0].message.content.strip()
-        parsed = extract_json(raw)
-
-        if parsed is None:
-            raise ValueError("Invalid JSON")
-
-        return parsed
-
-    except Exception:
-        st.error("LLM JSON parsing failed. Showing fallback.")
-        st.code(raw if 'raw' in locals() else "No raw output.")
-
-        return {
-            "core_thesis": "Model output could not be parsed.",
-            "drivers": [],
-            "bull_case": [],
-            "bear_case": [],
-            "verdict": "Unavailable",
-            "technology_context": [],
-            "news": news[:5]
-        }
+    client=Groq(api_key=st.session_state.key)
+    context="\n".join(n["headline"] for n in news)
+    res=client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[
+            {"role":"system","content":SYSTEM_PROMPT},
+            {"role":"user","content":context}
+        ],
+        temperature=0.2
+    )
+    raw=res.choices[0].message.content.strip()
+    parsed=extract_json(raw)
+    if parsed: return parsed
+    return {"core_thesis":"Parsing failed","drivers":[],"bull_case":[],"bear_case":[],"verdict":"N/A","news":news}
 
 # ---------------- MAIN ----------------
 if not run:
-    st.info("Enter key and run scan")
+    st.info("Enter key and run scan.")
 else:
     cols=st.columns(2)
     for i,block in enumerate(SUBJECTS):
         col=cols[i%2]
         with col:
-            news=fetch_country_news(country)
-            analysis=analyze_block(block,country,news)
-            if not analysis:
-                st.warning("No API key")
-                continue
+            news=fetch_news(block,country)
+            analysis=analyze(block,news)
 
             st.markdown(f"<div class='card'><div class='hdr'>{block}</div>",unsafe_allow_html=True)
-
             st.markdown("**Core Thesis**")
             st.write(analysis["core_thesis"])
 
@@ -181,11 +164,7 @@ else:
 
             st.markdown(f"**Verdict:** {analysis['verdict']}")
 
-            st.markdown("**Global Technology Context**")
-            for t in analysis["technology_context"]:
-                st.markdown(f"- {t}")
-
-            st.markdown("**Country News**")
+            st.markdown("**Country-Specific News**")
             for n in analysis["news"]:
                 st.markdown(f"- [{n['headline']}]({n['link']})")
 
