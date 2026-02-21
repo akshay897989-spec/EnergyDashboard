@@ -2,6 +2,24 @@ import streamlit as st
 import feedparser
 import json
 from groq import Groq
+import re
+
+def extract_json(text):
+    """
+    Safely extract first JSON object from model output.
+    """
+    try:
+        return json.loads(text)
+    except:
+        pass
+
+    match = re.search(r"\{.*\}", text, re.DOTALL)
+    if match:
+        try:
+            return json.loads(match.group())
+        except:
+            return None
+    return None
 from datetime import datetime
 
 # ---------------- CONFIG ----------------
@@ -83,16 +101,51 @@ def fetch_country_news(country):
 def analyze_block(block, country, news):
     if not st.session_state.key:
         return None
-    client=Groq(api_key=st.session_state.key)
-    context="\n".join([n["headline"] for n in news])
-    msg=f"Block:{block}\nCountry:{country}\nNews:\n{context}"
-    res=client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        messages=[{"role":"system","content":SYSTEM_PROMPT},
-                  {"role":"user","content":msg}],
-        temperature=0.2
-    )
-    return json.loads(res.choices[0].message.content)
+
+    client = Groq(api_key=st.session_state.key)
+    context = "\n".join([n["headline"] for n in news])
+
+    msg = f"""
+Block: {block}
+Country: {country}
+
+News:
+{context}
+
+Return strictly valid JSON only.
+"""
+
+    try:
+        res = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": msg}
+            ],
+            temperature=0.2
+        )
+
+        raw = res.choices[0].message.content.strip()
+        parsed = extract_json(raw)
+
+        if parsed is None:
+            raise ValueError("Invalid JSON")
+
+        return parsed
+
+    except Exception:
+        st.error("LLM JSON parsing failed. Showing fallback.")
+        st.code(raw if 'raw' in locals() else "No raw output.")
+
+        return {
+            "core_thesis": "Model output could not be parsed.",
+            "drivers": [],
+            "bull_case": [],
+            "bear_case": [],
+            "verdict": "Unavailable",
+            "technology_context": [],
+            "news": news[:5]
+        }
 
 # ---------------- MAIN ----------------
 if not run:
